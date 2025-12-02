@@ -22,12 +22,44 @@ const express = require("express");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { Pool } = require("pg");
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 const REDEEM_CODES_FILE = "redeem_codes.json";
+
+const pool = process.env.RAILWAY_DATABASE_URL 
+  ? new Pool({
+      connectionString: process.env.RAILWAY_DATABASE_URL,
+      ssl: { rejectUnauthorized: false }
+    })
+  : null;
+
+async function initDatabase() {
+  if (!pool) {
+    console.log("⚠️ Brak RAILWAY_DATABASE_URL - kody będą zapisywane lokalnie w pliku JSON");
+    return;
+  }
+  
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS redeem_codes (
+        id SERIAL PRIMARY KEY,
+        code VARCHAR(50) UNIQUE NOT NULL,
+        code_type VARCHAR(20) NOT NULL,
+        used BOOLEAN DEFAULT FALSE,
+        used_by VARCHAR(50),
+        used_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log("✅ Tabela redeem_codes gotowa w Railway");
+  } catch (err) {
+    console.error("❌ Błąd tworzenia tabeli w Railway:", err);
+  }
+}
 
 const client = new Client({
   intents: [
@@ -394,7 +426,7 @@ const getUserSettings = (userId) => {
   return allSettings[userId] || null;
 };
 
-const loadRedeemCodes = () => {
+const loadRedeemCodesLocal = () => {
   try {
     if (fs.existsSync(REDEEM_CODES_FILE)) {
       return JSON.parse(fs.readFileSync(REDEEM_CODES_FILE, "utf8"));
@@ -405,11 +437,54 @@ const loadRedeemCodes = () => {
   return { codes: [] };
 };
 
-const saveRedeemCodes = (data) => {
+const saveRedeemCodesLocal = (data) => {
   try {
     fs.writeFileSync(REDEEM_CODES_FILE, JSON.stringify(data, null, 2));
   } catch (e) {
     console.error("Blad zapisywania kodow:", e);
+  }
+};
+
+const loadRedeemCodesDB = async () => {
+  if (!pool) return loadRedeemCodesLocal();
+  
+  try {
+    const result = await pool.query("SELECT * FROM redeem_codes ORDER BY created_at DESC");
+    return {
+      codes: result.rows.map(row => ({
+        code: row.code,
+        codeType: row.code_type,
+        used: row.used,
+        usedBy: row.used_by,
+        usedAt: row.used_at ? row.used_at.toISOString() : null,
+        createdAt: row.created_at ? row.created_at.toISOString() : null
+      }))
+    };
+  } catch (e) {
+    console.error("Blad wczytywania kodow z Railway:", e);
+    return loadRedeemCodesLocal();
+  }
+};
+
+const saveCodeToDB = async (code, codeType) => {
+  if (!pool) {
+    const data = loadRedeemCodesLocal();
+    data.codes.push({ code, codeType, used: false });
+    saveRedeemCodesLocal(data);
+    return;
+  }
+  
+  try {
+    await pool.query(
+      "INSERT INTO redeem_codes (code, code_type) VALUES ($1, $2)",
+      [code, codeType]
+    );
+    console.log(`✅ Kod ${code} zapisany do Railway`);
+  } catch (e) {
+    console.error("Blad zapisywania kodu do Railway:", e);
+    const data = loadRedeemCodesLocal();
+    data.codes.push({ code, codeType, used: false });
+    saveRedeemCodesLocal(data);
   }
 };
 
@@ -426,28 +501,61 @@ const generateCode = () => {
   return parts.join("-");
 };
 
-const redeemCode = (code, userId) => {
-  const data = loadRedeemCodes();
-  const codeEntry = data.codes.find(c => c.code === code && !c.used);
-  
-  if (!codeEntry) {
-    return { success: false, message: "Kod jest nieprawidlowy lub juz zostal uzyty." };
+const redeemCode = async (code, userId) => {
+  if (!pool) {
+    const data = loadRedeemCodesLocal();
+    const codeEntry = data.codes.find(c => c.code === code && !c.used);
+    
+    if (!codeEntry) {
+      return { success: false, message: "Kod jest nieprawidlowy lub juz zostal uzyty." };
+    }
+    
+    codeEntry.used = true;
+    codeEntry.usedBy = userId;
+    codeEntry.usedAt = new Date().toISOString();
+    saveRedeemCodesLocal(data);
+    
+    if (codeEntry.codeType === "lifetime") {
+      setUserAccess(userId, 36500);
+      return { success: true, message: "Aktywowano dostep LIFETIME (100 lat)!", type: "lifetime" };
+    } else if (codeEntry.codeType === "31days") {
+      setUserAccess(userId, 31);
+      return { success: true, message: "Aktywowano dostep na 31 dni!", type: "31days" };
+    }
+    
+    return { success: false, message: "Nieznany typ kodu." };
   }
   
-  codeEntry.used = true;
-  codeEntry.usedBy = userId;
-  codeEntry.usedAt = new Date().toISOString();
-  saveRedeemCodes(data);
-  
-  if (codeEntry.codeType === "lifetime") {
-    setUserAccess(userId, 36500);
-    return { success: true, message: "Aktywowano dostep LIFETIME (100 lat)!", type: "lifetime" };
-  } else if (codeEntry.codeType === "31days") {
-    setUserAccess(userId, 31);
-    return { success: true, message: "Aktywowano dostep na 31 dni!", type: "31days" };
+  try {
+    const result = await pool.query(
+      "SELECT * FROM redeem_codes WHERE code = $1 AND used = FALSE",
+      [code]
+    );
+    
+    if (result.rows.length === 0) {
+      return { success: false, message: "Kod jest nieprawidlowy lub juz zostal uzyty." };
+    }
+    
+    const codeEntry = result.rows[0];
+    
+    await pool.query(
+      "UPDATE redeem_codes SET used = TRUE, used_by = $1, used_at = NOW() WHERE code = $2",
+      [userId, code]
+    );
+    
+    if (codeEntry.code_type === "lifetime") {
+      setUserAccess(userId, 36500);
+      return { success: true, message: "Aktywowano dostep LIFETIME (100 lat)!", type: "lifetime" };
+    } else if (codeEntry.code_type === "31days") {
+      setUserAccess(userId, 31);
+      return { success: true, message: "Aktywowano dostep na 31 dni!", type: "31days" };
+    }
+    
+    return { success: false, message: "Nieznany typ kodu." };
+  } catch (e) {
+    console.error("Blad realizacji kodu w Railway:", e);
+    return { success: false, message: "Wystapil blad podczas realizacji kodu." };
   }
-  
-  return { success: false, message: "Nieznany typ kodu." };
 };
 
 const commands = [
@@ -1043,7 +1151,7 @@ client.on("interactionCreate", async (interaction) => {
 
       if (interaction.commandName === "redeem") {
         const code = interaction.options.getString("kod").toUpperCase().trim();
-        const result = redeemCode(code, interaction.user.id);
+        const result = await redeemCode(code, interaction.user.id);
         
         if (result.success) {
           const emoji = result.type === "lifetime" ? "👑" : "✅";
@@ -2738,11 +2846,11 @@ const checkAuth = (token) => {
   return true;
 };
 
-app.get("/api/stats", (req, res) => {
+app.get("/api/stats", async (req, res) => {
   if (!checkAuth(req.query.token)) {
     return res.json({ error: "Unauthorized" });
   }
-  const data = loadRedeemCodes();
+  const data = await loadRedeemCodesDB();
   const stats = {
     total: data.codes.length,
     unused: data.codes.filter(c => !c.used).length,
@@ -2753,7 +2861,7 @@ app.get("/api/stats", (req, res) => {
   res.json(stats);
 });
 
-app.post("/api/generate", (req, res) => {
+app.post("/api/generate", async (req, res) => {
   if (!checkAuth(req.body.token)) {
     return res.json({ error: "Unauthorized" });
   }
@@ -2763,37 +2871,29 @@ app.post("/api/generate", (req, res) => {
     return res.json({ error: "Invalid parameters" });
   }
   
-  const data = loadRedeemCodes();
+  const data = await loadRedeemCodesDB();
   const newCodes = [];
   
   for (let i = 0; i < count; i++) {
     let code;
     do {
       code = generateCode();
-    } while (data.codes.some(c => c.code === code));
+    } while (data.codes.some(c => c.code === code) || newCodes.includes(code));
     
-    data.codes.push({
-      code,
-      codeType: type,
-      used: false,
-      usedBy: null,
-      usedAt: null,
-      createdAt: new Date().toISOString()
-    });
+    await saveCodeToDB(code, type);
     newCodes.push(code);
   }
   
-  saveRedeemCodes(data);
   res.json({ success: true, codes: newCodes });
 });
 
-app.get("/api/codes", (req, res) => {
+app.get("/api/codes", async (req, res) => {
   if (!checkAuth(req.query.token)) {
     return res.json({ error: "Unauthorized" });
   }
   
   const filter = req.query.filter || 'all';
-  const data = loadRedeemCodes();
+  const data = await loadRedeemCodesDB();
   let codes = data.codes;
   
   if (filter === '31days') {
@@ -2810,8 +2910,18 @@ app.get("/api/codes", (req, res) => {
 });
 
 const PORT = 5000;
-app.listen(PORT, "0.0.0.0", () => {
-  console.log("Web panel dostepny na porcie " + PORT);
-});
 
-client.login(process.env.DISCORD_TOKEN);
+async function startApp() {
+  await initDatabase();
+  
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log("Web panel dostepny na porcie " + PORT);
+  });
+  
+  await client.login(process.env.DISCORD_TOKEN);
+}
+
+startApp().catch(err => {
+  console.error("Blad uruchamiania aplikacji:", err);
+  process.exit(1);
+});
