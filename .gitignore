@@ -1,0 +1,11 @@
+node_modules/
+.env
+user_limits.json
+user_access.json
+form_tracker.json
+user_emails.json
+user_settings.json
+redeem_codes.json
+attached_assets/
+*.log
+.DS_Store

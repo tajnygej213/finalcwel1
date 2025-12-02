@@ -1,0 +1,143 @@
+========================================
+  DISCORD BOT - INSTALLATION GUIDE
+========================================
+
+REQUIREMENTS:
+- Windows 7/8/10/11
+- Node.js (https://nodejs.org/)
+- Gmail account with app password
+- Discord bot token
+
+========================================
+STEP BY STEP:
+========================================
+
+1. DOWNLOAD AND EXTRACT
+   - Extract all files to a folder
+   - Example: C:\DiscordBot\
+
+2. RUN SETUP
+   - Double-click: setup.bat
+   - Script will check Node.js and install dependencies
+
+3. CONFIGURE .env
+   - .env file will be created automatically
+   - Fill in the data:
+     * DISCORD_TOKEN - bot token
+     * GUILD_ID - Discord server ID
+     * EMAIL_USER - your Gmail
+     * EMAIL_PASS - Google app password
+
+4. START THE BOT
+   - Double-click: start.bat
+   - Bot should connect to Discord
+
+========================================
+HOW TO GET THE DATA:
+========================================
+
+DISCORD_TOKEN:
+> https://discord.com/developers/applications
+> Select your application > Bot > Reset Token
+
+GUILD_ID:
+> Discord: Settings > Advanced > Developer mode (enable)
+> Right-click on server > Copy Server ID
+
+EMAIL_PASS (Google app password):
+> https://myaccount.google.com/apppasswords
+> Create new password > Copy 16 characters
+
+========================================
+TOOLS:
+========================================
+
+setup.bat
+  > Installs dependencies and configures project
+
+start.bat
+  > Starts the bot
+
+reset_limits.bat
+  > Resets user limits (everyone gets unlimited access)
+
+========================================
+COMMON PROBLEMS:
+========================================
+
+1. "Cannot find module 'discord.js'"
+   > Run: setup.bat
+
+2. "Invalid token"
+   > Check DISCORD_TOKEN in .env file
+
+3. "Email not sending"
+   > Check EMAIL_PASS (app password, not regular Gmail password)
+   > Run: reset_limits.bat (you might have limit = 0)
+
+4. "Form not opening" / "Unknown interaction error"
+   > Run: reset_limits.bat
+   > Or use command: /resetlimit in Discord
+   > Make sure you click NEW button after bot restart
+
+5. "Images not showing in email"
+   > Image URLs MUST be public HTTPS links!
+   > DO NOT USE: local files, Replit dev URLs, private links
+   > RECOMMENDED: Upload to Imgur.com and copy the link
+   > Example: https://i.imgur.com/abc123.jpg
+
+========================================
+HOW TO GET IMAGE URLS:
+========================================
+
+Images in emails MUST be publicly accessible!
+
+OPTION 1 - Imgur (RECOMMENDED):
+1. Go to: https://imgur.com/upload
+2. Upload your product image
+3. Right-click image > "Copy image address"
+4. Paste URL in bot form (https://i.imgur.com/...)
+
+OPTION 2 - Other image hosting:
+- Cloudinary: https://cloudinary.com
+- ImgBB: https://imgbb.com
+- Postimages: https://postimages.org
+
+NEVER USE:
+X Local files (C:\image.jpg)
+X Replit dev URLs
+X Private Google Drive links
+X Non-HTTPS links
+
+========================================
+DISCORD COMMANDS:
+========================================
+
+/setlimit @user 10
+  > Set limit of 10 uses for user
+
+/resetlimit @user
+  > Remove limit (unlimited uses)
+
+/checklimit
+  > Check your limit
+
+/grantaccess @user 30
+  > Give access for 30 days
+
+/checkaccess
+  > Check how many days of access left
+
+========================================
+EVERYTHING WORKING?
+========================================
+
+After starting the bot:
+1. Bot connects to Discord
+2. Buttons appear in #generator channel
+3. Click "Wypelnij formularz zamowienia"
+4. Select template (Nike, Apple, etc.)
+5. Fill 2-3 modals
+6. Email will be sent!
+
+========================================
