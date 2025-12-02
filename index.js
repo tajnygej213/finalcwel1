@@ -30,9 +30,10 @@ app.use(express.urlencoded({ extended: true }));
 
 const REDEEM_CODES_FILE = "redeem_codes.json";
 
-const pool = process.env.RAILWAY_DATABASE_URL 
+const databaseUrl = process.env.RAILWAY_DATABASE_URL || process.env.DATABASE_URL;
+const pool = databaseUrl 
   ? new Pool({
-      connectionString: process.env.RAILWAY_DATABASE_URL,
+      connectionString: databaseUrl,
       ssl: { rejectUnauthorized: false }
     })
   : null;
