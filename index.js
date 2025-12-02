@@ -40,7 +40,7 @@ const pool = databaseUrl
 
 async function initDatabase() {
   if (!pool) {
-    console.log("⚠️ Brak RAILWAY_DATABASE_URL - kody będą zapisywane lokalnie w pliku JSON");
+    console.log("⚠️ Brak DATABASE_URL - dane będą zapisywane lokalnie w plikach JSON");
     return;
   }
   
@@ -56,9 +56,56 @@ async function initDatabase() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    console.log("✅ Tabela redeem_codes gotowa w Railway");
+    console.log("✅ Tabela redeem_codes gotowa");
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS user_limits (
+        user_id VARCHAR(50) PRIMARY KEY,
+        limit_count INTEGER DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log("✅ Tabela user_limits gotowa");
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS user_access (
+        user_id VARCHAR(50) PRIMARY KEY,
+        expiry_date TIMESTAMP NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log("✅ Tabela user_access gotowa");
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS user_emails (
+        user_id VARCHAR(50) PRIMARY KEY,
+        email VARCHAR(255) NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log("✅ Tabela user_emails gotowa");
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS user_settings (
+        user_id VARCHAR(50) PRIMARY KEY,
+        settings JSONB DEFAULT '{}',
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log("✅ Tabela user_settings gotowa");
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS form_tracker (
+        form_key VARCHAR(100) PRIMARY KEY,
+        message_id VARCHAR(50),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log("✅ Tabela form_tracker gotowa");
+
+    console.log("✅ Wszystkie tabele Railway gotowe!");
   } catch (err) {
-    console.error("❌ Błąd tworzenia tabeli w Railway:", err);
+    console.error("❌ Błąd tworzenia tabel w Railway:", err);
   }
 }
 
@@ -245,12 +292,12 @@ const TEMPLATE_CONFIG = {
 };
 
 const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com", // zamiast process.env.EMAIL_HOST
-  port: 587, // zamiast process.env.EMAIL_PORT
-  secure: false, // 465 = true, 587 = false
+  host: process.env.EMAIL_HOST || "smtp.gmail.com",
+  port: parseInt(process.env.EMAIL_PORT) || 587,
+  secure: (process.env.EMAIL_PORT === "465"),
   auth: {
-    user: "doxyii00@gmail.com", // zamiast process.env.EMAIL_USER
-    pass: "xwxg kpee dgnq ihes", // zamiast process.env.EMAIL_PASS (App Password)
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
   },
   logger: true,
   debug: true,
@@ -265,7 +312,7 @@ const esc = (s) =>
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 
-const loadLimits = () => {
+const loadLimitsLocal = () => {
   try {
     if (fs.existsSync(LIMITS_FILE)) {
       return JSON.parse(fs.readFileSync(LIMITS_FILE, "utf8"));
@@ -276,7 +323,7 @@ const loadLimits = () => {
   return {};
 };
 
-const saveLimits = (limits) => {
+const saveLimitsLocal = (limits) => {
   try {
     fs.writeFileSync(LIMITS_FILE, JSON.stringify(limits, null, 2));
   } catch (e) {
@@ -284,30 +331,67 @@ const saveLimits = (limits) => {
   }
 };
 
-const getUserLimit = (userId) => {
-  const limits = loadLimits();
-  return limits[userId] !== undefined ? limits[userId] : 0;
-};
-
-const setUserLimit = (userId, limit) => {
-  const limits = loadLimits();
-  limits[userId] = limit;
-  saveLimits(limits);
-};
-
-const decreaseUserLimit = (userId) => {
-  const limits = loadLimits();
-  if (limits[userId] !== undefined) {
-    if (limits[userId] > 0) {
-      limits[userId]--;
-      saveLimits(limits);
-    }
-    return limits[userId];
+const getUserLimit = async (userId) => {
+  if (!pool) {
+    const limits = loadLimitsLocal();
+    return limits[userId] !== undefined ? limits[userId] : 0;
   }
-  return 0;
+  try {
+    const result = await pool.query("SELECT limit_count FROM user_limits WHERE user_id = $1", [userId]);
+    return result.rows.length > 0 ? result.rows[0].limit_count : 0;
+  } catch (e) {
+    console.error("Błąd pobierania limitu z DB:", e);
+    const limits = loadLimitsLocal();
+    return limits[userId] !== undefined ? limits[userId] : 0;
+  }
 };
 
-const loadAccess = () => {
+const setUserLimit = async (userId, limit) => {
+  if (!pool) {
+    const limits = loadLimitsLocal();
+    limits[userId] = limit;
+    saveLimitsLocal(limits);
+    return;
+  }
+  try {
+    await pool.query(`
+      INSERT INTO user_limits (user_id, limit_count, updated_at) 
+      VALUES ($1, $2, NOW()) 
+      ON CONFLICT (user_id) DO UPDATE SET limit_count = $2, updated_at = NOW()
+    `, [userId, limit]);
+  } catch (e) {
+    console.error("Błąd zapisywania limitu do DB:", e);
+    const limits = loadLimitsLocal();
+    limits[userId] = limit;
+    saveLimitsLocal(limits);
+  }
+};
+
+const decreaseUserLimit = async (userId) => {
+  if (!pool) {
+    const limits = loadLimitsLocal();
+    if (limits[userId] !== undefined) {
+      if (limits[userId] > 0) {
+        limits[userId]--;
+        saveLimitsLocal(limits);
+      }
+      return limits[userId];
+    }
+    return 0;
+  }
+  try {
+    const result = await pool.query(`
+      UPDATE user_limits SET limit_count = GREATEST(limit_count - 1, 0), updated_at = NOW()
+      WHERE user_id = $1 RETURNING limit_count
+    `, [userId]);
+    return result.rows.length > 0 ? result.rows[0].limit_count : 0;
+  } catch (e) {
+    console.error("Błąd zmniejszania limitu w DB:", e);
+    return 0;
+  }
+};
+
+const loadAccessLocal = () => {
   try {
     if (fs.existsSync(ACCESS_FILE)) {
       return JSON.parse(fs.readFileSync(ACCESS_FILE, "utf8"));
@@ -318,7 +402,7 @@ const loadAccess = () => {
   return {};
 };
 
-const saveAccess = (access) => {
+const saveAccessLocal = (access) => {
   try {
     fs.writeFileSync(ACCESS_FILE, JSON.stringify(access, null, 2));
   } catch (e) {
@@ -326,29 +410,87 @@ const saveAccess = (access) => {
   }
 };
 
-const setUserAccess = (userId, days) => {
-  const access = loadAccess();
+const setUserAccess = async (userId, days) => {
   const expiryDate = new Date();
   expiryDate.setDate(expiryDate.getDate() + days);
-  access[userId] = expiryDate.toISOString();
-  saveAccess(access);
-  return expiryDate;
+  
+  if (!pool) {
+    const access = loadAccessLocal();
+    access[userId] = expiryDate.toISOString();
+    saveAccessLocal(access);
+    return expiryDate;
+  }
+  
+  try {
+    await pool.query(`
+      INSERT INTO user_access (user_id, expiry_date, updated_at) 
+      VALUES ($1, $2, NOW()) 
+      ON CONFLICT (user_id) DO UPDATE SET expiry_date = $2, updated_at = NOW()
+    `, [userId, expiryDate.toISOString()]);
+    return expiryDate;
+  } catch (e) {
+    console.error("Błąd zapisywania dostępu do DB:", e);
+    const access = loadAccessLocal();
+    access[userId] = expiryDate.toISOString();
+    saveAccessLocal(access);
+    return expiryDate;
+  }
 };
 
-const checkUserAccess = (userId) => {
-  const access = loadAccess();
-  if (!access[userId]) {
-    return { hasAccess: false, noAccess: true };
+const checkUserAccess = async (userId) => {
+  if (!pool) {
+    const access = loadAccessLocal();
+    if (!access[userId]) {
+      return { hasAccess: false, noAccess: true };
+    }
+    const expiryDate = new Date(access[userId]);
+    const now = new Date();
+    if (now > expiryDate) {
+      return { hasAccess: false, expired: true, expiryDate };
+    }
+    return { hasAccess: true, unlimited: true, expiryDate };
   }
-  const expiryDate = new Date(access[userId]);
-  const now = new Date();
-  if (now > expiryDate) {
-    return { hasAccess: false, expired: true, expiryDate };
+  
+  try {
+    const result = await pool.query("SELECT expiry_date FROM user_access WHERE user_id = $1", [userId]);
+    if (result.rows.length === 0) {
+      return { hasAccess: false, noAccess: true };
+    }
+    const expiryDate = new Date(result.rows[0].expiry_date);
+    const now = new Date();
+    if (now > expiryDate) {
+      return { hasAccess: false, expired: true, expiryDate };
+    }
+    return { hasAccess: true, unlimited: true, expiryDate };
+  } catch (e) {
+    console.error("Błąd sprawdzania dostępu w DB:", e);
+    const access = loadAccessLocal();
+    if (!access[userId]) {
+      return { hasAccess: false, noAccess: true };
+    }
+    const expiryDate = new Date(access[userId]);
+    const now = new Date();
+    if (now > expiryDate) {
+      return { hasAccess: false, expired: true, expiryDate };
+    }
+    return { hasAccess: true, unlimited: true, expiryDate };
   }
-  return { hasAccess: true, unlimited: true, expiryDate };
 };
 
-const loadFormTracker = () => {
+const clearAllUserAccess = async () => {
+  if (!pool) {
+    saveAccessLocal({});
+    return;
+  }
+  try {
+    await pool.query("DELETE FROM user_access");
+  } catch (e) {
+    console.error("Błąd usuwania dostępu w DB:", e);
+    saveAccessLocal({});
+  }
+};
+
+const loadFormTrackerLocal = () => {
   try {
     if (fs.existsSync(FORM_TRACKER_FILE)) {
       return JSON.parse(fs.readFileSync(FORM_TRACKER_FILE, "utf8"));
@@ -359,7 +501,7 @@ const loadFormTracker = () => {
   return {};
 };
 
-const saveFormTracker = (tracker) => {
+const saveFormTrackerLocal = (tracker) => {
   try {
     fs.writeFileSync(FORM_TRACKER_FILE, JSON.stringify(tracker, null, 2));
   } catch (e) {
@@ -367,7 +509,78 @@ const saveFormTracker = (tracker) => {
   }
 };
 
-const loadEmails = () => {
+const loadFormTracker = async () => {
+  if (!pool) return loadFormTrackerLocal();
+  try {
+    const result = await pool.query("SELECT form_key, message_id, created_at FROM form_tracker");
+    const tracker = {};
+    result.rows.forEach(row => {
+      tracker[row.form_key] = {
+        messageId: row.message_id,
+        timestamp: row.created_at ? row.created_at.toISOString() : null
+      };
+    });
+    return tracker;
+  } catch (e) {
+    console.error("Błąd wczytywania trackera z DB:", e);
+    return loadFormTrackerLocal();
+  }
+};
+
+const saveFormTracker = async (formKey, messageId) => {
+  if (!pool) {
+    const tracker = loadFormTrackerLocal();
+    tracker[formKey] = { messageId, timestamp: new Date().toISOString() };
+    saveFormTrackerLocal(tracker);
+    return;
+  }
+  try {
+    await pool.query(`
+      INSERT INTO form_tracker (form_key, message_id, created_at) 
+      VALUES ($1, $2, NOW()) 
+      ON CONFLICT (form_key) DO UPDATE SET message_id = $2, created_at = NOW()
+    `, [formKey, messageId]);
+  } catch (e) {
+    console.error("Błąd zapisywania trackera do DB:", e);
+    const tracker = loadFormTrackerLocal();
+    tracker[formKey] = { messageId, timestamp: new Date().toISOString() };
+    saveFormTrackerLocal(tracker);
+  }
+};
+
+const getFormTrackerEntry = async (formKey) => {
+  if (!pool) {
+    const tracker = loadFormTrackerLocal();
+    return tracker[formKey] || null;
+  }
+  try {
+    const result = await pool.query("SELECT message_id, created_at FROM form_tracker WHERE form_key = $1", [formKey]);
+    if (result.rows.length === 0) return null;
+    return {
+      messageId: result.rows[0].message_id,
+      timestamp: result.rows[0].created_at ? result.rows[0].created_at.toISOString() : null
+    };
+  } catch (e) {
+    console.error("Błąd pobierania trackera z DB:", e);
+    const tracker = loadFormTrackerLocal();
+    return tracker[formKey] || null;
+  }
+};
+
+const resetFormTracker = async () => {
+  if (!pool) {
+    saveFormTrackerLocal({});
+    return;
+  }
+  try {
+    await pool.query("DELETE FROM form_tracker");
+  } catch (e) {
+    console.error("Błąd resetowania trackera w DB:", e);
+    saveFormTrackerLocal({});
+  }
+};
+
+const loadEmailsLocal = () => {
   try {
     if (fs.existsSync(EMAILS_FILE)) {
       return JSON.parse(fs.readFileSync(EMAILS_FILE, "utf8"));
@@ -378,7 +591,7 @@ const loadEmails = () => {
   return {};
 };
 
-const saveEmails = (emails) => {
+const saveEmailsLocal = (emails) => {
   try {
     fs.writeFileSync(EMAILS_FILE, JSON.stringify(emails, null, 2));
   } catch (e) {
@@ -386,18 +599,43 @@ const saveEmails = (emails) => {
   }
 };
 
-const getUserEmail = (userId) => {
-  const emails = loadEmails();
-  return emails[userId] || null;
+const getUserEmail = async (userId) => {
+  if (!pool) {
+    const emails = loadEmailsLocal();
+    return emails[userId] || null;
+  }
+  try {
+    const result = await pool.query("SELECT email FROM user_emails WHERE user_id = $1", [userId]);
+    return result.rows.length > 0 ? result.rows[0].email : null;
+  } catch (e) {
+    console.error("Błąd pobierania emaila z DB:", e);
+    const emails = loadEmailsLocal();
+    return emails[userId] || null;
+  }
 };
 
-const setUserEmail = (userId, email) => {
-  const emails = loadEmails();
-  emails[userId] = email;
-  saveEmails(emails);
+const setUserEmail = async (userId, email) => {
+  if (!pool) {
+    const emails = loadEmailsLocal();
+    emails[userId] = email;
+    saveEmailsLocal(emails);
+    return;
+  }
+  try {
+    await pool.query(`
+      INSERT INTO user_emails (user_id, email, updated_at) 
+      VALUES ($1, $2, NOW()) 
+      ON CONFLICT (user_id) DO UPDATE SET email = $2, updated_at = NOW()
+    `, [userId, email]);
+  } catch (e) {
+    console.error("Błąd zapisywania emaila do DB:", e);
+    const emails = loadEmailsLocal();
+    emails[userId] = email;
+    saveEmailsLocal(emails);
+  }
 };
 
-const loadSettings = () => {
+const loadSettingsLocal = () => {
   try {
     if (fs.existsSync(SETTINGS_FILE)) {
       return JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8"));
@@ -408,7 +646,7 @@ const loadSettings = () => {
   return {};
 };
 
-const saveSettings = (settings) => {
+const saveSettingsLocal = (settings) => {
   try {
     fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
   } catch (e) {
@@ -416,15 +654,40 @@ const saveSettings = (settings) => {
   }
 };
 
-const setUserSettings = (userId, settings) => {
-  const allSettings = loadSettings();
-  allSettings[userId] = settings;
-  saveSettings(allSettings);
+const setUserSettings = async (userId, settings) => {
+  if (!pool) {
+    const allSettings = loadSettingsLocal();
+    allSettings[userId] = settings;
+    saveSettingsLocal(allSettings);
+    return;
+  }
+  try {
+    await pool.query(`
+      INSERT INTO user_settings (user_id, settings, updated_at) 
+      VALUES ($1, $2, NOW()) 
+      ON CONFLICT (user_id) DO UPDATE SET settings = $2, updated_at = NOW()
+    `, [userId, JSON.stringify(settings)]);
+  } catch (e) {
+    console.error("Błąd zapisywania ustawień do DB:", e);
+    const allSettings = loadSettingsLocal();
+    allSettings[userId] = settings;
+    saveSettingsLocal(allSettings);
+  }
 };
 
-const getUserSettings = (userId) => {
-  const allSettings = loadSettings();
-  return allSettings[userId] || null;
+const getUserSettings = async (userId) => {
+  if (!pool) {
+    const allSettings = loadSettingsLocal();
+    return allSettings[userId] || null;
+  }
+  try {
+    const result = await pool.query("SELECT settings FROM user_settings WHERE user_id = $1", [userId]);
+    return result.rows.length > 0 ? result.rows[0].settings : null;
+  } catch (e) {
+    console.error("Błąd pobierania ustawień z DB:", e);
+    const allSettings = loadSettingsLocal();
+    return allSettings[userId] || null;
+  }
 };
 
 const loadRedeemCodesLocal = () => {
@@ -517,10 +780,10 @@ const redeemCode = async (code, userId) => {
     saveRedeemCodesLocal(data);
     
     if (codeEntry.codeType === "lifetime") {
-      setUserAccess(userId, 36500);
+      await setUserAccess(userId, 36500);
       return { success: true, message: "Aktywowano dostep LIFETIME (100 lat)!", type: "lifetime" };
     } else if (codeEntry.codeType === "31days") {
-      setUserAccess(userId, 31);
+      await setUserAccess(userId, 31);
       return { success: true, message: "Aktywowano dostep na 31 dni!", type: "31days" };
     }
     
@@ -545,10 +808,10 @@ const redeemCode = async (code, userId) => {
     );
     
     if (codeEntry.code_type === "lifetime") {
-      setUserAccess(userId, 36500);
+      await setUserAccess(userId, 36500);
       return { success: true, message: "Aktywowano dostep LIFETIME (100 lat)!", type: "lifetime" };
     } else if (codeEntry.code_type === "31days") {
-      setUserAccess(userId, 31);
+      await setUserAccess(userId, 31);
       return { success: true, message: "Aktywowano dostep na 31 dni!", type: "31days" };
     }
     
@@ -705,10 +968,10 @@ client.once("ready", async () => {
     return;
   }
 
-  const tracker = loadFormTracker();
   const formKey = `${guild.id}_${channel.id}`;
+  const trackerEntry = await getFormTrackerEntry(formKey);
 
-  if (tracker[formKey]) {
+  if (trackerEntry) {
     console.log(
       `✅ Formularz już istnieje na kanale #${CHANNEL_NAME} - pomijam wysyłanie`,
     );
@@ -733,11 +996,7 @@ client.once("ready", async () => {
     components: [row],
   });
 
-  tracker[formKey] = {
-    messageId: sentMessage.id,
-    timestamp: new Date().toISOString(),
-  };
-  saveFormTracker(tracker);
+  await saveFormTracker(formKey, sentMessage.id);
 
   console.log(`✅ Wysłano trwały formularz na kanał #${CHANNEL_NAME}`);
 });
@@ -813,7 +1072,7 @@ client.on("messageCreate", async (message) => {
         return message.reply("❌ Liczba dni musi być >= 1");
       }
 
-      const expiryDate = setUserAccess(userId, days);
+      const expiryDate = await setUserAccess(userId, days);
       const user = await client.users.fetch(userId).catch(() => null);
       const userName = user ? user.tag : userId;
 
@@ -843,7 +1102,7 @@ client.on("messageCreate", async (message) => {
         );
       }
 
-      saveFormTracker({});
+      await resetFormTracker();
       await message.reply(
         "✅ Tracker formularzy został zresetowany! Bot wyśle formularz ponownie przy następnym uruchomieniu.",
       );
@@ -870,7 +1129,7 @@ client.on("interactionCreate", async (interaction) => {
       console.log("🔘 BUTTON CLICKED: open_stockx_form");
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-      const accessStatus = checkUserAccess(interaction.user.id);
+      const accessStatus = await checkUserAccess(interaction.user.id);
 
       if (!accessStatus.hasAccess) {
         if (accessStatus.noAccess) {
@@ -887,7 +1146,7 @@ client.on("interactionCreate", async (interaction) => {
           });
         }
 
-        const userLimit = getUserLimit(interaction.user.id);
+        const userLimit = await getUserLimit(interaction.user.id);
 
         if (userLimit === 0) {
           return interaction.editReply({
@@ -996,7 +1255,7 @@ client.on("interactionCreate", async (interaction) => {
         const targetUser = interaction.options.getUser("użytkownik");
         const limit = interaction.options.getInteger("liczba");
 
-        setUserLimit(targetUser.id, limit);
+        await setUserLimit(targetUser.id, limit);
 
         await interaction
           .reply({
@@ -1019,7 +1278,7 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       if (interaction.commandName === "removeallaccess") {
-        saveAccess({});
+        await clearAllUserAccess();
 
         await interaction
           .reply({
@@ -1049,7 +1308,7 @@ client.on("interactionCreate", async (interaction) => {
           });
         }
 
-        const limit = getUserLimit(userId);
+        const limit = await getUserLimit(userId);
         const userName = targetUser ? targetUser.tag : "Masz";
 
         const content = targetUser
@@ -1068,7 +1327,7 @@ client.on("interactionCreate", async (interaction) => {
         const targetUser = interaction.options.getUser("użytkownik");
         const days = interaction.options.getInteger("dni");
 
-        const expiryDate = setUserAccess(targetUser.id, days);
+        const expiryDate = await setUserAccess(targetUser.id, days);
         const dateStr = expiryDate.toLocaleDateString("pl-PL");
 
         await interaction
@@ -1106,7 +1365,7 @@ client.on("interactionCreate", async (interaction) => {
           });
         }
 
-        const accessInfo = checkUserAccess(userId);
+        const accessInfo = await checkUserAccess(userId);
         const userName = targetUser ? targetUser.tag : "Masz";
 
         if (accessInfo.noAccess) {
@@ -1337,8 +1596,8 @@ client.on("interactionCreate", async (interaction) => {
         country,
       };
 
-      setUserSettings(interaction.user.id, completeSettings);
-      setUserEmail(interaction.user.id, completeSettings.email);
+      await setUserSettings(interaction.user.id, completeSettings);
+      await setUserEmail(interaction.user.id, completeSettings.email);
 
       delete interaction.client.tempSettings[interaction.user.id];
 
@@ -1507,7 +1766,7 @@ client.on("interactionCreate", async (interaction) => {
         .setCustomId("stockx_modal_2")
         .setTitle("Formularz - Część 2/2");
 
-      const savedEmail = getUserEmail(interaction.user.id);
+      const savedEmail = await getUserEmail(interaction.user.id);
 
       const emailInput = new TextInputBuilder()
         .setCustomId("email")
@@ -1847,7 +2106,7 @@ client.on("interactionCreate", async (interaction) => {
         productQty: `Qty ${quantity}`,
       });
 
-      const userSettings = getUserSettings(interaction.user.id);
+      const userSettings = await getUserSettings(interaction.user.id);
 
       let html = readTpl(config.file);
 
@@ -2027,7 +2286,7 @@ client.on("interactionCreate", async (interaction) => {
         html,
       });
 
-      const accessStatus = checkUserAccess(interaction.user.id);
+      const accessStatus = await checkUserAccess(interaction.user.id);
       let usageMessage = "";
 
       if (accessStatus.hasAccess) {
@@ -2036,7 +2295,7 @@ client.on("interactionCreate", async (interaction) => {
         );
         usageMessage = "📊 **Dostęp czasowy aktywny - nieograniczone użycia!**";
       } else {
-        const remainingUses = decreaseUserLimit(interaction.user.id);
+        const remainingUses = await decreaseUserLimit(interaction.user.id);
         console.log(
           `✅ Wysłano email [${template}]: ${info.messageId} | Użytkownik: ${interaction.user.tag} | Pozostało: ${remainingUses}`,
         );
@@ -2209,7 +2468,7 @@ client.on("interactionCreate", async (interaction) => {
         estimatedDelivery,
       });
 
-      const userSettings = getUserSettings(interaction.user.id);
+      const userSettings = await getUserSettings(interaction.user.id);
       let html = readTpl(config.file);
 
       html = html
@@ -2402,7 +2661,7 @@ client.on("interactionCreate", async (interaction) => {
         html,
       });
 
-      const accessStatus = checkUserAccess(interaction.user.id);
+      const accessStatus = await checkUserAccess(interaction.user.id);
       let usageMessage = "";
 
       if (accessStatus.hasAccess) {
@@ -2411,7 +2670,7 @@ client.on("interactionCreate", async (interaction) => {
         );
         usageMessage = "📊 **Dostęp czasowy aktywny - nieograniczone użycia!**";
       } else {
-        const remainingUses = decreaseUserLimit(interaction.user.id);
+        const remainingUses = await decreaseUserLimit(interaction.user.id);
         console.log(
           `✅ Wysłano email [${template}]: ${info.messageId} | Użytkownik: ${interaction.user.tag} | Pozostało: ${remainingUses}`,
         );
@@ -2451,14 +2710,12 @@ client.on("interactionCreate", async (interaction) => {
 });
 client.on("guildMemberAdd", async (member) => {
   try {
-    // nowy użytkownik = brak dostępu
-    setUserAccess(member.id, false);
     console.log(
-      `🚫 Użytkownik ${member.user.tag} dołączył — dostęp ustawiony na FALSE`,
+      `👋 Użytkownik ${member.user.tag} dołączył — nowy użytkownik bez dostępu`,
     );
   } catch (error) {
     console.error(
-      "Błąd przy ustawianiu access = false dla nowego użytkownika:",
+      "Błąd przy obsłudze nowego użytkownika:",
       error,
     );
   }
